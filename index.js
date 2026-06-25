@@ -13,7 +13,7 @@ const client = new Client({
     ]
 });
 
-const PREFIX = '!';
+const PREFIX = 'nya!';
 
 client.commands = new Map();
 

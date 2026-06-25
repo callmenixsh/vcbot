@@ -39,7 +39,7 @@ async function updateBoard(game) {
         .setTitle(`🥔 Hot Potato | Passes: ${game.passCount}`)
         .addFields(
             {
-                name: '---------',
+                name: 'Status',
                 value: game.status,
                 inline: false
             },
@@ -196,7 +196,7 @@ module.exports = {
             holderMessage,
             endTime: Date.now() + explodeTime,
             statusMessage,
-            status: '🥔 The potato seems harmless...',
+            status: 'The potato seems harmless...',
             passes: [],
             passCount: 0,
         });
