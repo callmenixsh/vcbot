@@ -36,7 +36,7 @@ module.exports = {
             "Go sleep RIGHT NOW!!",
         ];
 
-        const awakeTexts = [
+        const awakeAdvice = [
             "should stay awake and continue normally.",
             "is in a good state to remain active.",
             "does not need sleep right now.",
