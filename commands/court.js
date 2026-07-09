@@ -11,16 +11,14 @@ const { safeEdit } = require("../utils/safeEdit");
 
 const activeCourts = new Map();
 
+const MAX_TRIALS = 5; // trials 1-4 are normal, trial 5 is sudden death
+
 function randomRoll() {
   return Math.floor(Math.random() * 36) + 15;
 }
 
 function lastTwo(arr) {
   return arr.slice(-2).join("\n") || "No actions yet.";
-}
-
-function lastN(arr, n) {
-  return arr.slice(-n).join("\n") || "No previous cases.";
 }
 
 function randomPick(arr) {
@@ -72,6 +70,14 @@ const NOT_GUILTY_INTROS = [
   "The courtroom erupts in murmurs as the verdict is read aloud.",
   "Justice has spoken, and mercy prevails today.",
   "The scales of justice tip decisively — in the defendant's favor.",
+];
+
+const SUDDEN_DEATH_INTROS = [
+  "Four trials. No clear winner. The court has one final chance to settle this.",
+  "The jury is deadlocked. A single argument will decide everything.",
+  "The gavel slams down. One last round. One final truth.",
+  "Four hearings and still no resolution. The court calls for a sudden death round.",
+  "The courtroom holds its breath. One argument each — and this ends today.",
 ];
 
 const PUNISHMENT_LINES = [
@@ -127,7 +133,6 @@ function makeVerdictAttachment(guilty) {
 
 function createContext(source) {
   const isInteraction = !!source.commandName;
-
   if (isInteraction) {
     return {
       isInteraction: true,
@@ -136,19 +141,14 @@ function createContext(source) {
       guild: source.guild,
       channel: source.channel,
       async ack() {
-        if (!source.deferred && !source.replied) {
-          await source.deferReply();
-        }
+        if (!source.deferred && !source.replied) await source.deferReply();
       },
       async sendMain(payload) {
-        if (source.deferred || source.replied) {
-          return source.editReply(payload);
-        }
+        if (source.deferred || source.replied) return source.editReply(payload);
         return source.reply(payload);
       },
     };
   }
-
   return {
     isInteraction: false,
     user: source.author,
@@ -184,7 +184,6 @@ module.exports = {
     const defendantMember =
       interaction.options.getMember("defendant") ||
       (await interaction.guild.members.fetch(defendantUser.id).catch(() => null));
-
     return runCourt(ctx, defendantMember);
   },
 };
@@ -192,24 +191,16 @@ module.exports = {
 async function runCourt(ctx, defendant) {
   await ctx.ack();
 
-  if (!defendant) {
-    return ctx.sendMain("⚖️ Mention somebody to put on trial.");
-  }
-
-  if (defendant.user.bot) {
-    return ctx.sendMain("⚖️ Bots cannot stand trial.");
-  }
-
-  if (defendant.id === ctx.user.id) {
-    return ctx.sendMain("⚖️ You cannot accuse yourself.");
-  }
-
-  if (activeCourts.has(ctx.channel.id)) {
-    return ctx.sendMain("⚖️ A court session is already active in this channel.");
-  }
+  if (!defendant) return ctx.sendMain("⚖️ Mention somebody to put on trial.");
+  if (defendant.user.bot) return ctx.sendMain("⚖️ Bots cannot stand trial.");
+  if (defendant.id === ctx.user.id) return ctx.sendMain("⚖️ You cannot accuse yourself.");
+  if (activeCourts.has(ctx.channel.id)) return ctx.sendMain("⚖️ A court session is already active in this channel.");
 
   const accuser = ctx.member;
+
+  // Persists across all trials in the session.
   const caseHistory = [];
+  let trialNumber = 0; // incremented at the start of each trial
 
   const court = {
     accuser,
@@ -228,23 +219,41 @@ async function runCourt(ctx, defendant) {
 
   activeCourts.set(ctx.channel.id, court);
 
+  // ─── EMBED BUILDER ───────────────────────────────────────────────────────────
+
   const buildEmbed = ({ showCourtRecord = true } = {}) => {
+    const isSuddenDeath = trialNumber === MAX_TRIALS;
+
     const phaseTitle =
       court.phase === "ready"
-        ? "⚖️ Court Convenes"
+        ? isSuddenDeath
+          ? "⚡ Sudden Death Round"
+          : `⚖️ Court Convenes — Trial ${trialNumber || 1}`
         : court.phase === "trial"
-          ? "⚖️ The Trial Is Underway"
+          ? isSuddenDeath
+            ? "⚡ Sudden Death — Final Argument"
+            : "⚖️ The Trial Is Underway"
           : "⚖️ Court Adjourned";
 
     const phaseDescription =
       court.phase === "ready"
-        ? "Both parties are summoned. The court cannot proceed until each has entered the room."
+        ? isSuddenDeath
+          ? "Both parties return for one final hearing. **Each side gets one argument only.** The verdict is final — no further appeals."
+          : "Both parties are summoned. The court cannot proceed until each has entered the room."
         : court.phase === "trial"
-          ? "Arguments are being heard. The court will render its verdict once both sides have spoken."
+          ? isSuddenDeath
+            ? "One argument per side. The highest Case Strength wins — and that's the end of it."
+            : "Arguments are being heard. The court will render its verdict once both sides have spoken."
           : "The court has reached its verdict.";
 
+    const trialLabel = isSuddenDeath
+      ? `⚡ Sudden Death — Trial ${trialNumber}`
+      : trialNumber > 0
+        ? `Trial ${trialNumber}`
+        : "";
+
     return new EmbedBuilder()
-      .setColor("#d4af37")
+      .setColor(isSuddenDeath ? "#ff4444" : "#d4af37")
       .setTitle(phaseTitle)
       .setDescription(phaseDescription)
       .addFields(
@@ -260,7 +269,7 @@ async function runCourt(ctx, defendant) {
         },
         { name: "\u200b", value: "\u200b", inline: false },
         ...(caseHistory.length > 0
-          ? [{ name: "📜 Retrial History", value: lastN(caseHistory, 3) }]
+          ? [{ name: "📜 Trial History", value: caseHistory.join("\n") }]
           : []),
         ...(showCourtRecord
           ? [{ name: "📜 Court Record", value: lastTwo(court.history) }]
@@ -270,12 +279,18 @@ async function runCourt(ctx, defendant) {
       .setFooter({
         text:
           court.phase === "ready"
-            ? "The bailiff awaits both parties"
+            ? isSuddenDeath
+              ? "One argument each — this is it"
+              : "The bailiff awaits both parties"
             : court.phase === "trial"
-              ? "10 arguments per side • 120 seconds"
+              ? isSuddenDeath
+                ? "⚡ Sudden Death — 1 argument per side • 120 seconds"
+                : `10 arguments per side • 120 seconds${trialLabel ? ` • ${trialLabel}` : ""}`
               : "The gavel has struck",
       });
   };
+
+  // ─── ROW BUILDERS ────────────────────────────────────────────────────────────
 
   const buildReadyRow = () =>
     new ActionRowBuilder().addComponents(
@@ -289,22 +304,137 @@ async function runCourt(ctx, defendant) {
         .setStyle(court.defendantReady ? ButtonStyle.Success : ButtonStyle.Secondary)
     );
 
-  const buildTrialRow = () =>
-    new ActionRowBuilder().addComponents(
+  const buildTrialRow = (isSuddenDeath = false) => {
+    const buttons = [
       new ButtonBuilder().setCustomId("accuse").setLabel("⚔️ Accuse").setStyle(ButtonStyle.Danger),
-      new ButtonBuilder().setCustomId("defend").setLabel("🛡️ Defend").setStyle(ButtonStyle.Primary)
+      new ButtonBuilder().setCustomId("defend").setLabel("🛡️ Defend").setStyle(ButtonStyle.Primary),
+    ];
+    // No withdraw option in sudden death — the case must be decided.
+    if (!isSuddenDeath) {
+      buttons.push(
+        new ButtonBuilder().setCustomId("withdraw").setLabel("🏳 Withdraw Case").setStyle(ButtonStyle.Secondary)
+      );
+    }
+    return new ActionRowBuilder().addComponents(...buttons);
+  };
+
+  // ─── SEND INITIAL MESSAGE ────────────────────────────────────────────────────
+
+  const courtMessage = await ctx.channel.send({
+    embeds: [buildEmbed({ showCourtRecord: false })],
+    components: [buildReadyRow()],
+  });
+
+  // ─── VERDICT HELPER ──────────────────────────────────────────────────────────
+
+  // Determines and posts the final verdict for a completed trial.
+  // isFinalVerdict = true means no more retrials are ever offered.
+  const postVerdict = async (accuserFinal, defendantFinal, isFinalVerdict) => {
+    let winner, loser, guilty;
+
+    // Tiebreak for non-sudden-death trials only (sudden death
+    // already has just 1 roll each so ties are extremely rare,
+    // but handle it cleanly anyway).
+    while (accuserFinal === defendantFinal) {
+      const a = randomRoll();
+      const d = randomRoll();
+      accuserFinal += a;
+      defendantFinal += d;
+      court.history.push(
+        `⚡ Tiebreak → ${accuser.displayName} +${a} | ${defendant.displayName} +${d}`
+      );
+    }
+
+    if (accuserFinal > defendantFinal) {
+      winner = accuser;
+      loser = defendant;
+      guilty = true;
+    } else {
+      winner = defendant;
+      loser = accuser;
+      guilty = false;
+    }
+
+    court.phase = "ended";
+    court.accuserScore = accuserFinal;
+    court.defendantScore = defendantFinal;
+
+    const margin = Math.abs(accuserFinal - defendantFinal);
+    caseHistory.push(
+      `Trial ${trialNumber}: ${guilty ? "⚖️ GUILTY" : "✅ NOT GUILTY"} — ${winner} beat ${loser} by **${margin}** (${accuserFinal}–${defendantFinal})`
     );
 
-  const buildVerdictRow = (guilty) => {
-    const buttons = [
+    const filename = verdictFilename(guilty);
+    const verdictImage = makeVerdictAttachment(guilty);
+    const introLine = randomPick(guilty ? GUILTY_INTROS : NOT_GUILTY_INTROS);
+
+    // On the final verdict (trial 5 or unanimous) show no further options
+    // for not-guilty (nothing to do). For guilty on the final verdict,
+    // skip the choice and apply punishment immediately.
+    if (isFinalVerdict && guilty) {
+      const punishment = randomLine(PUNISHMENT_LINES, loser, winner);
+      const sentenceImage = makeVerdictAttachment(guilty);
+
+      await safeEdit(
+        courtMessage,
+        {
+          embeds: [
+            buildEmbed({ showCourtRecord: false })
+              .setColor("Red")
+              .setTitle("⚖️ GUILTY — SENTENCE IMPOSED")
+              .setDescription(
+                `${introLine}\n\nThe court has spoken for the last time. No appeal remains.`
+              )
+              .addFields({ name: "🔨 Sentence", value: punishment })
+              .setImage(`attachment://${filename}`)
+              .setFooter({ text: "Case permanently closed." }),
+          ],
+          files: [sentenceImage],
+          components: [],
+        },
+        () => activeCourts.delete(ctx.channel.id)
+      );
+
+      court.ended = true;
+      activeCourts.delete(ctx.channel.id);
+      return;
+    }
+
+    if (isFinalVerdict && !guilty) {
+      await safeEdit(
+        courtMessage,
+        {
+          embeds: [
+            buildEmbed({ showCourtRecord: false })
+              .setColor("Green")
+              .setTitle("⚖️ THE VERDICT: NOT GUILTY")
+              .setDescription(
+                `${introLine}\n\nThe court has spoken for the last time. No appeal remains.`
+              )
+              .setImage(`attachment://${filename}`)
+              .setFooter({ text: "Case permanently closed." }),
+          ],
+          files: [verdictImage],
+          components: [],
+        },
+        () => activeCourts.delete(ctx.channel.id)
+      );
+
+      court.ended = true;
+      activeCourts.delete(ctx.channel.id);
+      return;
+    }
+
+    // Normal verdict (trials 1–4): loser may demand a retrial or accept fate.
+    const verdictButtons = [
       new ButtonBuilder()
         .setCustomId("retrial")
-        .setLabel("⚖️ Demand a Retrial")
+        .setLabel(`⚖️ Demand a Retrial`)
         .setStyle(ButtonStyle.Danger),
     ];
 
     if (guilty) {
-      buttons.push(
+      verdictButtons.push(
         new ButtonBuilder()
           .setCustomId("punishment")
           .setLabel("🔨 Accept Punishment")
@@ -312,13 +442,110 @@ async function runCourt(ctx, defendant) {
       );
     }
 
-    return new ActionRowBuilder().addComponents(...buttons);
+    const trialsLeft = (MAX_TRIALS - 1) - trialNumber;
+    const footerNote =
+      trialsLeft === 1
+        ? "The next retrial will be the last."
+        : trialsLeft === 0
+          ? "No further retrials will be granted."
+          : "The losing party may demand a retrial.";
+
+    await safeEdit(
+      courtMessage,
+      {
+        embeds: [
+          buildEmbed({ showCourtRecord: false })
+            .setColor(guilty ? "Red" : "Green")
+            .setTitle(guilty ? "⚖️ THE VERDICT: GUILTY" : "⚖️ THE VERDICT: NOT GUILTY")
+            .setDescription(introLine)
+            .setImage(`attachment://${filename}`)
+            .setFooter({ text: footerNote }),
+        ],
+        files: [verdictImage],
+        components: [new ActionRowBuilder().addComponents(...verdictButtons)],
+      },
+      () => activeCourts.delete(ctx.channel.id)
+    );
+
+    const verdictCollector = courtMessage.createMessageComponentCollector({
+      time: 60000,
+      filter: (i) => i.customId === "retrial" || i.customId === "punishment",
+    });
+
+    verdictCollector.on("collect", async (interaction) => {
+      if (interaction.user.id !== loser.id) {
+        return interaction.reply({ content: "Only the losing party may make this choice.", ephemeral: true });
+      }
+
+      // ---- ACCEPT PUNISHMENT ----
+      if (interaction.customId === "punishment") {
+        court.ended = true;
+        court.phase = "ended";
+        court.history.push(`🔨 ${defendant} accepted the court's sentence without further contest.`);
+
+        const punishment = randomLine(PUNISHMENT_LINES, loser, winner);
+        const sentenceImage = makeVerdictAttachment(guilty);
+
+        await interaction.update({
+          embeds: [
+            buildEmbed({ showCourtRecord: false })
+              .setColor("Red")
+              .setTitle("🔨 Sentence Carried Out")
+              .setDescription(
+                `${defendant} has been found **GUILTY** as charged and accepts the court's sentence without further contest.`
+              )
+              .addFields({ name: "⚖️ Sentence", value: punishment })
+              .setImage(`attachment://${filename}`)
+              .setFooter({ text: "Case closed." }),
+          ],
+          files: [sentenceImage],
+          components: [],
+        });
+
+        verdictCollector.stop("punished");
+        activeCourts.delete(ctx.channel.id);
+        return;
+      }
+
+      // ---- DEMAND A RETRIAL ----
+      court.phase = "ready";
+      court.ended = false;
+      court.withdrawAllowedId = interaction.user.id;
+      court.accuserReady = false;
+      court.defendantReady = false;
+      court.accuserScore = 0;
+      court.defendantScore = 0;
+      court.accuserRolls = trialNumber < MAX_TRIALS - 1 ? 10 : 1;
+      court.defendantRolls = trialNumber < MAX_TRIALS - 1 ? 10 : 1;
+      court.history = [
+        trialNumber + 1 === MAX_TRIALS
+          ? `⚡ ${loser} has demanded a sudden death retrial.`
+          : `⚖️ ${loser} has demanded a retrial.`,
+      ];
+
+      trialNumber++; // advance before building the next embed
+
+      await interaction.update({
+        embeds: [buildEmbed({ showCourtRecord: false })],
+        components: [buildReadyRow()],
+        files: [],
+      });
+
+      verdictCollector.stop("retrial");
+      activeCourts.set(ctx.channel.id, court);
+      startReadyPhase();
+    });
+
+    verdictCollector.on("end", async (_, reason) => {
+      if (reason === "retrial" || reason === "punished") return;
+      // Timed out — strip buttons.
+      court.ended = true;
+      activeCourts.delete(ctx.channel.id);
+      await safeEdit(courtMessage, { components: [] }, () => {});
+    });
   };
 
-  const courtMessage = await ctx.channel.send({
-    embeds: [buildEmbed({ showCourtRecord: false })],
-    components: [buildReadyRow()],
-  });
+  // ─── READY PHASE ─────────────────────────────────────────────────────────────
 
   const startReadyPhase = () => {
     const readyCollector = courtMessage.createMessageComponentCollector({
@@ -350,9 +577,11 @@ async function runCourt(ctx, defendant) {
         court.history.push("⚖️ Both parties have entered the courtroom.");
         readyCollector.stop("advanced");
 
+        const isSuddenDeath = trialNumber === MAX_TRIALS;
+
         await interaction.update({
           embeds: [buildEmbed()],
-          components: [buildTrialRow()],
+          components: [buildTrialRow(isSuddenDeath)],
         });
 
         startTrialPhase();
@@ -371,240 +600,115 @@ async function runCourt(ctx, defendant) {
     });
   };
 
+  // ─── TRIAL PHASE ─────────────────────────────────────────────────────────────
+
   const startTrialPhase = () => {
-    let trialIndex = 1;
-    let accuserWins = 0;
-    let defendantWins = 0;
-    let seriesEnded = false;
+    const isSuddenDeath = trialNumber === MAX_TRIALS;
 
-    const resolveSeries = async (reasonText) => {
-      if (seriesEnded) return;
-      seriesEnded = true;
-      court.phase = "ended";
-      activeCourts.delete(ctx.channel.id);
+    const trialCollector = courtMessage.createMessageComponentCollector({
+      time: 120000,
+      filter: (i) => i.customId === "accuse" || i.customId === "defend" || i.customId === "withdraw",
+    });
 
-      let accuserFinal = accuserWins;
-      let defendantFinal = defendantWins;
-
-      let guilty;
-      let winner;
-      let loser;
-      let introLine;
-
-      if (accuserFinal > defendantFinal) {
-        guilty = true;
-        winner = accuser;
-        loser = defendant;
-        introLine = randomPick(GUILTY_INTROS);
-      } else {
-        guilty = false;
-        winner = defendant;
-        loser = accuser;
-        introLine = randomPick(NOT_GUILTY_INTROS);
+    trialCollector.on("collect", async (interaction) => {
+      if (court.ended) {
+        return interaction.reply({ content: "⚖️ This court session has ended.", ephemeral: true });
       }
 
-      const margin = Math.abs(accuserFinal - defendantFinal);
-      caseHistory.push(
-        `Trial ${trialIndex - 1}: ⚖️ ${winner.displayName} beat ${loser.displayName} by **${margin}** (${accuserFinal}-${defendantFinal})`
-      );
-
-      const filename = verdictFilename(guilty);
-      const verdictImage = makeVerdictAttachment(guilty);
-
-      await safeEdit(
-        courtMessage,
-        {
-          embeds: [
-            buildEmbed({ showCourtRecord: false })
-              .setColor(guilty ? "Red" : "Green")
-              .setTitle(guilty ? "⚖️ THE VERDICT: GUILTY" : "⚖️ THE VERDICT: NOT GUILTY")
-              .setDescription(introLine)
-              .setImage(`attachment://${filename}`),
-          ],
-          files: [verdictImage],
-          components: [buildVerdictRow(guilty)],
-        },
-        () => activeCourts.delete(ctx.channel.id)
-      );
-
-      const verdictCollector = courtMessage.createMessageComponentCollector({
-        time: 60000,
-        filter: (i) => i.customId === "retrial" || i.customId === "punishment",
-      });
-
-      verdictCollector.on("collect", async (interaction) => {
-        if (interaction.user.id !== loser.id) {
-          return interaction.reply({ content: "Only the losing party may make this choice.", ephemeral: true });
+      // ---- ACCUSE ----
+      if (interaction.customId === "accuse") {
+        if (interaction.user.id !== accuser.id) {
+          return interaction.reply({ content: "Only the accuser may present evidence.", ephemeral: true });
+        }
+        if (court.accuserRolls <= 0) {
+          return interaction.reply({ content: "No accusations remaining.", ephemeral: true });
         }
 
-        if (interaction.customId === "punishment") {
-          court.ended = true;
-          court.phase = "ended";
-          court.history.push(`🔨 ${defendant} accepted the court's sentence without further contest.`);
+        const roll = randomRoll();
+        court.accuserScore += roll;
+        court.accuserRolls--;
+        court.history.push(randomLine(ACCUSE_LINES, accuser, roll));
 
-          const punishment = randomLine(PUNISHMENT_LINES, loser, winner);
-          const sentenceImage = makeVerdictAttachment(guilty);
+        await interaction.deferUpdate();
+        await safeEdit(courtMessage, { embeds: [buildEmbed()] }, () => activeCourts.delete(ctx.channel.id));
 
-          await interaction.update({
-            embeds: [
-              buildEmbed({ showCourtRecord: false })
-                .setColor("Red")
-                .setTitle("🔨 Sentence Carried Out")
-                .setDescription(
-                  `${defendant} has been found **GUILTY** as charged and accepts the court's sentence without further contest.`
-                )
-                .addFields({ name: "⚖️ Sentence", value: punishment })
-                .setImage(`attachment://${filename}`)
-                .setFooter({ text: "Case closed." }),
-            ],
-            files: [sentenceImage],
-            components: [],
+        if (court.accuserRolls <= 0 && court.defendantRolls <= 0) trialCollector.stop("finished");
+        return;
+      }
+
+      // ---- DEFEND ----
+      if (interaction.customId === "defend") {
+        if (interaction.user.id !== defendant.id) {
+          return interaction.reply({ content: "Only the defendant may defend themselves.", ephemeral: true });
+        }
+        if (court.defendantRolls <= 0) {
+          return interaction.reply({ content: "No defenses remaining.", ephemeral: true });
+        }
+
+        const roll = randomRoll();
+        court.defendantScore += roll;
+        court.defendantRolls--;
+        court.history.push(randomLine(DEFEND_LINES, defendant, roll));
+
+        await interaction.deferUpdate();
+        await safeEdit(courtMessage, { embeds: [buildEmbed()] }, () => activeCourts.delete(ctx.channel.id));
+
+        if (court.accuserRolls <= 0 && court.defendantRolls <= 0) trialCollector.stop("finished");
+        return;
+      }
+
+      // ---- WITHDRAW (not available in sudden death) ----
+      if (interaction.customId === "withdraw") {
+        if (interaction.user.id !== court.withdrawAllowedId) {
+          return interaction.reply({
+            content: "Only the party who brought this case to trial may withdraw it.",
+            ephemeral: true,
           });
-
-          verdictCollector.stop("punished");
-          activeCourts.delete(ctx.channel.id);
-          return;
         }
 
-        if (interaction.customId === "retrial") {
-          court.phase = "ready";
-          court.ended = false;
-          court.withdrawAllowedId = interaction.user.id;
-          court.accuserReady = false;
-          court.defendantReady = false;
-          court.accuserScore = 0;
-          court.defendantScore = 0;
-          court.accuserRolls = 10;
-          court.defendantRolls = 10;
-          court.history = [`⚖️ ${loser} has demanded a retrial.`];
-
-          await interaction.update({
-            embeds: [buildEmbed({ showCourtRecord: false })],
-            components: [buildReadyRow()],
-            files: [],
-          });
-
-          verdictCollector.stop("retrial");
-          activeCourts.set(ctx.channel.id, court);
-          startReadyPhase();
-        }
-      });
-
-      verdictCollector.on("end", async (_, reason) => {
-        if (reason === "retrial" || reason === "punished") return;
+        const withdrawer = interaction.user.id === accuser.id ? accuser : defendant;
         court.ended = true;
-        activeCourts.delete(ctx.channel.id);
-        await safeEdit(courtMessage, { components: [] }, () => {});
-      });
-    };
+        court.phase = "ended";
+        court.history.push(`🏳 ${withdrawer} withdrew the case.`);
 
-    const runTrial = async () => {
-      if (seriesEnded) return;
-
-      if (trialIndex > 4) {
-        const tied = accuserWins === defendantWins;
-        if (tied) {
-          trialIndex = 5;
-          const a = randomRoll();
-          const d = randomRoll();
-          accuserWins += a;
-          defendantWins += d;
-          court.history.push(`⚡ Sudden Death Trial 5 → ${accuser.displayName} +${a} | ${defendant.displayName} +${d}`);
-        }
-        return resolveSeries("series complete");
-      }
-
-      const trialCollector = courtMessage.createMessageComponentCollector({
-        time: 120000,
-        filter: (i) => i.customId === "accuse" || i.customId === "defend",
-      });
-
-      trialCollector.on("collect", async (interaction) => {
-        if (seriesEnded) {
-          return interaction.reply({ content: "⚖️ This court session has ended.", ephemeral: true });
-        }
-
-        if (interaction.customId === "accuse") {
-          if (interaction.user.id !== accuser.id) {
-            return interaction.reply({ content: "Only the accuser may present evidence.", ephemeral: true });
-          }
-          if (court.accuserRolls <= 0) {
-            return interaction.reply({ content: "No accusations remaining.", ephemeral: true });
-          }
-
-          const roll = randomRoll();
-          court.accuserScore += roll;
-          court.accuserRolls--;
-          court.history.push(randomLine(ACCUSE_LINES, accuser, roll));
-          await interaction.deferUpdate();
-          await safeEdit(courtMessage, { embeds: [buildEmbed()] }, () => activeCourts.delete(ctx.channel.id));
-          if (court.accuserRolls <= 0 && court.defendantRolls <= 0) trialCollector.stop("finished");
-          return;
-        }
-
-        if (interaction.customId === "defend") {
-          if (interaction.user.id !== defendant.id) {
-            return interaction.reply({ content: "Only the defendant may defend themselves.", ephemeral: true });
-          }
-          if (court.defendantRolls <= 0) {
-            return interaction.reply({ content: "No defenses remaining.", ephemeral: true });
-          }
-
-          const roll = randomRoll();
-          court.defendantScore += roll;
-          court.defendantRolls--;
-          court.history.push(randomLine(DEFEND_LINES, defendant, roll));
-          await interaction.deferUpdate();
-          await safeEdit(courtMessage, { embeds: [buildEmbed()] }, () => activeCourts.delete(ctx.channel.id));
-          if (court.accuserRolls <= 0 && court.defendantRolls <= 0) trialCollector.stop("finished");
-        }
-      });
-
-      trialCollector.on("end", async () => {
-        const accuserWonTrial = court.accuserScore >= court.defendantScore;
-        const defendantWonTrial = court.defendantScore > court.accuserScore;
-
-        if (accuserWonTrial) accuserWins++;
-        if (defendantWonTrial) defendantWins++;
+        const reasonLine = randomLine(WITHDRAWAL_LINES, withdrawer);
+        const introLine = randomPick(WITHDRAWAL_INTROS);
 
         caseHistory.push(
-          `Trial ${trialIndex}: ⚖️ ${accuserWonTrial ? accuser.displayName : defendant.displayName} won the trial (${court.accuserScore}-${court.defendantScore})`
+          `Trial ${trialNumber}: 🏳️ ${withdrawer} withdrew before a verdict (${court.accuserScore}–${court.defendantScore})`
         );
 
-        if (accuserWins >= 3 || defendantWins >= 3) {
-          trialIndex = 5;
-          return resolveSeries("best of five decided early");
-        }
+        await interaction.update({
+          embeds: [
+            buildEmbed({ showCourtRecord: false })
+              .setColor("Grey")
+              .setTitle("🏳️ Case Withdrawn")
+              .setDescription(introLine)
+              .addFields({ name: "📜 Reason for Withdrawal", value: reasonLine })
+              .setThumbnail(withdrawer.displayAvatarURL())
+              .setFooter({ text: "Case closed — no verdict was reached." }),
+          ],
+          components: [],
+        });
 
-        if (trialIndex === 4 && accuserWins === 2 && defendantWins === 2) {
-          trialIndex = 5;
-          const a = randomRoll();
-          const d = randomRoll();
-          accuserWins += a;
-          defendantWins += d;
-          court.history.push(`⚡ Sudden Death Trial 5 → ${accuser.displayName} +${a} | ${defendant.displayName} +${d}`);
-          return resolveSeries("sudden death");
-        }
+        trialCollector.stop("withdrawn");
+      }
+    });
 
-        trialIndex++;
-        if (trialIndex <= 4) {
-          await safeEdit(
-            courtMessage,
-            {
-              embeds: [buildEmbed()],
-              components: [buildTrialRow()],
-            },
-            () => activeCourts.delete(ctx.channel.id)
-          );
-          return runTrial();
-        }
+    trialCollector.on("end", async (_, reason) => {
+      activeCourts.delete(ctx.channel.id);
+      if (reason === "withdrawn") return;
 
-        return resolveSeries("series complete");
-      });
-    };
-
-    runTrial();
+      // isFinalVerdict = trial 5 (sudden death), or if time ran out with no winner
+      await postVerdict(court.accuserScore, court.defendantScore, isSuddenDeath);
+    });
   };
+
+  // ─── KICK OFF ────────────────────────────────────────────────────────────────
+
+  trialNumber = 1;
+  court.accuserRolls = 10;
+  court.defendantRolls = 10;
 
   startReadyPhase();
 }

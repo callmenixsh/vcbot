@@ -5,8 +5,122 @@ const {
   ButtonStyle,
   SlashCommandBuilder,
 } = require("discord.js");
-const { joinVoiceChannel, getVoiceConnection } = require("@discordjs/voice");
+const {
+  joinVoiceChannel,
+  getVoiceConnection,
+  VoiceConnectionStatus,
+  entersState,
+} = require("@discordjs/voice");
 const { safeEdit } = require("../utils/safeEdit");
+
+// ─── KEEPALIVE ────────────────────────────────────────────────────────────────
+//
+// Stores { channelId, guildId, adapterCreator } per guild so we always know
+// where to reconnect to, independent of any connection object.
+//
+const keepaliveTargets = new Map(); // guildId → { channelId, guild }
+
+// How long to wait before retrying after a failed reconnect (ms).
+const RECONNECT_DELAY = 5_000;
+
+// Attempt to join a channel and immediately start watching the connection.
+// Returns the new VoiceConnection.
+async function connectAndWatch(guild, channelId) {
+  // Tear down any existing connection cleanly first.
+  const existing = getVoiceConnection(guild.id);
+  if (existing) {
+    try { existing.destroy(); } catch {}
+  }
+
+  const connection = joinVoiceChannel({
+    channelId,
+    guildId: guild.id,
+    adapterCreator: guild.voiceAdapterCreator,
+    selfDeaf: true,
+  });
+
+  // Wait until we're actually ready before attaching the watcher,
+  // so we don't bind to a connection that's about to be torn down.
+  try {
+    await entersState(connection, VoiceConnectionStatus.Ready, 15_000);
+  } catch {
+    // If we can't reach Ready in 15s, destroy and let the caller deal with it.
+    try { connection.destroy(); } catch {}
+    throw new Error("Could not reach Ready state.");
+  }
+
+  watchConnection(guild, channelId, connection);
+  return connection;
+}
+
+// Attach a single long-lived stateChange listener to a connection.
+// Handles both manual kicks (Disconnected → Destroyed) and network drops
+// (Disconnected → recovers on its own or needs a fresh join).
+function watchConnection(guild, channelId, connection) {
+  // Remove any previous listener on this connection object to avoid doubles.
+  connection.removeAllListeners("stateChange");
+
+  connection.on("stateChange", async (oldState, newState) => {
+    // If keepalive was disabled, stop doing anything.
+    if (!keepaliveTargets.has(guild.id)) return;
+
+    if (newState.status === VoiceConnectionStatus.Disconnected) {
+      // Discord kicks produce Disconnected with a websocket close code.
+      // Try to let the library recover on its own (network hiccup) first.
+      try {
+        await Promise.race([
+          entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
+          entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
+        ]);
+        // Library is recovering — let it finish; the Ready handler isn't needed
+        // because another stateChange will fire when it gets there.
+        return;
+      } catch {
+        // Didn't recover in 5s — assume we were kicked. Destroy and reconnect.
+        try { connection.destroy(); } catch {}
+        // Fall through to the Destroyed handler below via the next stateChange,
+        // OR reconnect here directly since destroy() fires synchronously.
+        scheduleReconnect(guild, channelId);
+      }
+    }
+
+    if (newState.status === VoiceConnectionStatus.Destroyed) {
+      // Could arrive here from a destroy() we triggered above OR from an
+      // external destroy (e.g. bot kicked). Either way, reconnect.
+      scheduleReconnect(guild, channelId);
+    }
+  });
+}
+
+// Debounced reconnect: prevents double-reconnect when both Disconnected and
+// Destroyed fire in quick succession (which happens on a kick).
+const reconnectTimers = new Map(); // guildId → timeout
+
+function scheduleReconnect(guild, channelId) {
+  if (!keepaliveTargets.has(guild.id)) return;
+
+  // If a reconnect is already pending, don't stack another one.
+  if (reconnectTimers.has(guild.id)) return;
+
+  const timer = setTimeout(async () => {
+    reconnectTimers.delete(guild.id);
+
+    // Still wanted?
+    if (!keepaliveTargets.has(guild.id)) return;
+
+    try {
+      await connectAndWatch(guild, channelId);
+    } catch (err) {
+      console.error(`[keepalive] Reconnect failed for ${guild.id}:`, err.message);
+      // Retry again after another delay.
+      scheduleReconnect(guild, channelId);
+    }
+  }, RECONNECT_DELAY);
+
+  reconnectTimers.set(guild.id, timer);
+}
+
+// ─── SLEEP / TIMERS ───────────────────────────────────────────────────────────
 
 let sleepTimers = [];
 let sleepMessages = [];
@@ -29,6 +143,8 @@ function parseTime(input) {
 function clockTime(date = new Date()) {
   return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
+
+// ─── CONTEXT HELPER ───────────────────────────────────────────────────────────
 
 function contextFrom(source) {
   const isInteraction = Boolean(source.user);
@@ -54,6 +170,8 @@ function contextFrom(source) {
     reply: (payload) => source.reply(payload),
   };
 }
+
+// ─── ACTIONS ──────────────────────────────────────────────────────────────────
 
 const ACTIONS = {
   disconnect: {
@@ -98,6 +216,8 @@ const ACTIONS = {
   },
 };
 
+// ─── SINGLE / MASS SCHEDULERS ─────────────────────────────────────────────────
+
 async function scheduleSingleAction(ctx, { member, delayMs, title, verb, emoji, action, cancelId, completedText }) {
   const end = Math.floor((Date.now() + delayMs) / 1000);
 
@@ -116,13 +236,11 @@ async function scheduleSingleAction(ctx, { member, delayMs, title, verb, emoji, 
 
   const timeout = setTimeout(async () => {
     if (cancelled) return;
-
     try {
       if (member.voice.channel) await action(member);
     } catch (err) {
       console.error("vc single-action error:", err);
     }
-
     if (!msg.editable) return;
     await safeEdit(msg, {
       embeds: [
@@ -142,10 +260,8 @@ async function scheduleSingleAction(ctx, { member, delayMs, title, verb, emoji, 
     if (i.user.id !== ctx.authorId) {
       return i.reply({ content: "Only the command author can cancel this.", ephemeral: true });
     }
-
     cancelled = true;
     clearTimeout(timeout);
-
     await i.update({
       embeds: [
         new EmbedBuilder()
@@ -155,7 +271,6 @@ async function scheduleSingleAction(ctx, { member, delayMs, title, verb, emoji, 
       ],
       components: [],
     });
-
     collector.stop();
   });
 }
@@ -182,7 +297,6 @@ async function scheduleMassAction(ctx, { members, delayMs, title, verb, emoji, c
 
   const timeout = setTimeout(async () => {
     if (cancelled) return;
-
     const affected = [];
     for (const member of members) {
       try {
@@ -193,7 +307,6 @@ async function scheduleMassAction(ctx, { members, delayMs, title, verb, emoji, c
         console.error("vc mass-action error:", err);
       }
     }
-
     if (!msg.editable) return;
     await safeEdit(msg, {
       embeds: [
@@ -215,10 +328,8 @@ async function scheduleMassAction(ctx, { members, delayMs, title, verb, emoji, c
     if (i.user.id !== ctx.authorId) {
       return i.reply({ content: "Only the command author can cancel this.", ephemeral: true });
     }
-
     cancelled = true;
     clearTimeout(timeout);
-
     await i.update({
       embeds: [
         new EmbedBuilder()
@@ -228,10 +339,11 @@ async function scheduleMassAction(ctx, { members, delayMs, title, verb, emoji, c
       ],
       components: [],
     });
-
     collector.stop();
   });
 }
+
+// ─── SLEEP ────────────────────────────────────────────────────────────────────
 
 async function scheduleSleep(ctx, vc) {
   const members = [...vc.members.values()].filter((m) => !m.user.bot);
@@ -277,6 +389,8 @@ async function scheduleSleep(ctx, vc) {
   );
 }
 
+// ─── HANDLERS ─────────────────────────────────────────────────────────────────
+
 async function runSingleAction(ctx, actionKey, member, timeArg) {
   if (!member) return ctx.reply("Select a user.");
   if (!member.voice.channel) return ctx.reply("That user is not in VC.");
@@ -319,9 +433,7 @@ async function handleSleepCancel(ctx) {
   sleepTimers.length = 0;
 
   for (const msg of sleepMessages) {
-    try {
-      await msg.delete();
-    } catch {}
+    try { await msg.delete(); } catch {}
   }
   sleepMessages.length = 0;
 
@@ -329,25 +441,59 @@ async function handleSleepCancel(ctx) {
 }
 
 async function handleAfk(ctx, mode) {
+  const { guild } = ctx;
+
   if (mode === "leave") {
-    const connection = getVoiceConnection(ctx.guild.id);
-    if (!connection) return ctx.reply("❌ I'm not in a VC.");
-    connection.destroy();
+    // Cancel any pending reconnect.
+    const timer = reconnectTimers.get(guild.id);
+    if (timer) {
+      clearTimeout(timer);
+      reconnectTimers.delete(guild.id);
+    }
+
+    keepaliveTargets.delete(guild.id);
+
+    const connection = getVoiceConnection(guild.id);
+    if (connection) {
+      connection.removeAllListeners("stateChange");
+      connection.destroy();
+    }
+
+    try {
+      await guild.members.me.setNickname(null);
+    } catch (err) {
+      console.error("[keepalive] Failed to reset nickname:", err.message);
+    }
+
     return ctx.reply("🔇 Keepalive disabled. Left the VC.");
   }
 
+  // mode === "join"
   const vc = ctx.member?.voice?.channel;
   if (!vc) return ctx.reply("🎧 Join a voice channel first.");
 
-  joinVoiceChannel({
-    channelId: vc.id,
-    guildId: vc.guild.id,
-    adapterCreator: vc.guild.voiceAdapterCreator,
-    selfDeaf: true,
-  });
+  // Register the target first so watchConnection/scheduleReconnect
+  // know keepalive is active before any async work starts.
+  keepaliveTargets.set(guild.id, { channelId: vc.id, guild });
+
+  try {
+    await connectAndWatch(guild, vc.id);
+  } catch (err) {
+    keepaliveTargets.delete(guild.id);
+    console.error("[keepalive] Initial connect error:", err.message);
+    return ctx.reply("❌ Could not join the voice channel.");
+  }
+
+  try {
+    await guild.members.me.setNickname("Nyako - The VC guard");
+  } catch (err) {
+    console.error("[keepalive] Failed to set nickname:", err.message);
+  }
 
   return ctx.reply(`🔊 Keepalive enabled. Staying in **${vc.name}**.`);
 }
+
+// ─── SLASH COMMAND DEFINITION ─────────────────────────────────────────────────
 
 const actionChoices = [
   { name: "Disconnect", value: "disconnect" },
@@ -368,7 +514,9 @@ const data = new SlashCommandBuilder()
         o.setName("action").setDescription("What to do").setRequired(true).addChoices(...actionChoices)
       )
       .addUserOption((o) => o.setName("target").setDescription("Target user").setRequired(true))
-      .addStringOption((o) => o.setName("time").setDescription("Delay, e.g. 30s, 2m, 1m30s (default 10s)").setRequired(false))
+      .addStringOption((o) =>
+        o.setName("time").setDescription("Delay, e.g. 30s, 2m, 1m30s (default 10s)").setRequired(false)
+      )
   )
   .addSubcommand((sc) =>
     sc
@@ -377,7 +525,9 @@ const data = new SlashCommandBuilder()
       .addStringOption((o) =>
         o.setName("action").setDescription("What to do").setRequired(true).addChoices(...actionChoices)
       )
-      .addStringOption((o) => o.setName("time").setDescription("Delay, e.g. 30s, 2m, 1m30s (default 10s)").setRequired(false))
+      .addStringOption((o) =>
+        o.setName("time").setDescription("Delay, e.g. 30s, 2m, 1m30s (default 10s)").setRequired(false)
+      )
   )
   .addSubcommand((sc) =>
     sc
@@ -392,6 +542,8 @@ const data = new SlashCommandBuilder()
       )
   )
   .addSubcommand((sc) => sc.setName("sleepcancel").setDescription("Cancel a pending sleep sequence"));
+
+// ─── EXPORTS ──────────────────────────────────────────────────────────────────
 
 const vcCommand = {
   name: "vc",
@@ -467,7 +619,9 @@ const vcCommand = {
     if (sub === "user") {
       const action = interaction.options.getString("action", true);
       const user = interaction.options.getUser("target", true);
-      const member = interaction.options.getMember("target") || (await interaction.guild.members.fetch(user.id).catch(() => null));
+      const member =
+        interaction.options.getMember("target") ||
+        (await interaction.guild.members.fetch(user.id).catch(() => null));
       return runSingleAction(ctx, action, member, interaction.options.getString("time"));
     }
 
