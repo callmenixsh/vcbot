@@ -8,11 +8,9 @@ const {
 const { joinVoiceChannel, getVoiceConnection } = require("@discordjs/voice");
 const { safeEdit } = require("../utils/safeEdit");
 
-// ---------------- sleep-sequence state ----------------
 let sleepTimers = [];
 let sleepMessages = [];
 
-// ---------------- time parsing ----------------
 function parseTime(input) {
   if (!input) return 10000;
   if (/^\d+$/.test(input)) return parseInt(input, 10) * 1000;
@@ -32,7 +30,6 @@ function clockTime(date = new Date()) {
   return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 
-// ---------------- context adapter ----------------
 function contextFrom(source) {
   const isInteraction = Boolean(source.user);
 
@@ -43,13 +40,8 @@ function contextFrom(source) {
       member: source.member,
       authorId: source.user.id,
       reply: (payload) => {
-        const data =
-          typeof payload === "string"
-            ? { content: payload, ephemeral: true }
-            : payload;
-        return source.replied || source.deferred
-          ? source.followUp(data)
-          : source.reply(data);
+        const data = typeof payload === "string" ? { content: payload, ephemeral: true } : payload;
+        return source.replied || source.deferred ? source.followUp(data) : source.reply(data);
       },
     };
   }
@@ -63,7 +55,6 @@ function contextFrom(source) {
   };
 }
 
-// ---------------- action table ----------------
 const ACTIONS = {
   disconnect: {
     title: "Disconnect",
@@ -107,7 +98,6 @@ const ACTIONS = {
   },
 };
 
-// ---------------- scheduling: single-target ----------------
 async function scheduleSingleAction(ctx, { member, delayMs, title, verb, emoji, action, cancelId, completedText }) {
   const end = Math.floor((Date.now() + delayMs) / 1000);
 
@@ -118,11 +108,7 @@ async function scheduleSingleAction(ctx, { member, delayMs, title, verb, emoji, 
     .setFooter({ text: `At ${clockTime(new Date(Date.now() + delayMs))}` });
 
   const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(cancelId)
-      .setLabel("Cancel")
-      .setEmoji("❌")
-      .setStyle(ButtonStyle.Secondary)
+    new ButtonBuilder().setCustomId(cancelId).setLabel("Cancel").setEmoji("❌").setStyle(ButtonStyle.Secondary)
   );
 
   const msg = await ctx.channel.send({ embeds: [embed], components: [row] });
@@ -154,10 +140,7 @@ async function scheduleSingleAction(ctx, { member, delayMs, title, verb, emoji, 
 
   collector.on("collect", async (i) => {
     if (i.user.id !== ctx.authorId) {
-      return i.reply({
-        content: "Only the command author can cancel this.",
-        ephemeral: true,
-      });
+      return i.reply({ content: "Only the command author can cancel this.", ephemeral: true });
     }
 
     cancelled = true;
@@ -177,7 +160,6 @@ async function scheduleSingleAction(ctx, { member, delayMs, title, verb, emoji, 
   });
 }
 
-// ---------------- scheduling: mass target ----------------
 async function scheduleMassAction(ctx, { members, delayMs, title, verb, emoji, completeText, action, cancelId, isSleep = false }) {
   const end = Math.floor((Date.now() + delayMs) / 1000);
   const targetList = members.slice(0, 10).map((m) => `${m}`).join(", ");
@@ -190,11 +172,7 @@ async function scheduleMassAction(ctx, { members, delayMs, title, verb, emoji, c
     .setFooter({ text: `At ${clockTime(new Date(Date.now() + delayMs))}` });
 
   const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(cancelId)
-      .setLabel("Cancel")
-      .setEmoji("❌")
-      .setStyle(ButtonStyle.Secondary)
+    new ButtonBuilder().setCustomId(cancelId).setLabel("Cancel").setEmoji("❌").setStyle(ButtonStyle.Secondary)
   );
 
   const msg = await ctx.channel.send({ embeds: [embed], components: [row] });
@@ -235,10 +213,7 @@ async function scheduleMassAction(ctx, { members, delayMs, title, verb, emoji, c
 
   collector.on("collect", async (i) => {
     if (i.user.id !== ctx.authorId) {
-      return i.reply({
-        content: "Only the command author can cancel this.",
-        ephemeral: true,
-      });
+      return i.reply({ content: "Only the command author can cancel this.", ephemeral: true });
     }
 
     cancelled = true;
@@ -258,7 +233,6 @@ async function scheduleMassAction(ctx, { members, delayMs, title, verb, emoji, c
   });
 }
 
-// ---------------- sleep sequence ----------------
 async function scheduleSleep(ctx, vc) {
   const members = [...vc.members.values()].filter((m) => !m.user.bot);
   if (!members.length) return;
@@ -303,7 +277,6 @@ async function scheduleSleep(ctx, vc) {
   );
 }
 
-// ---------------- helpers ----------------
 async function runSingleAction(ctx, actionKey, member, timeArg) {
   if (!member) return ctx.reply("Select a user.");
   if (!member.voice.channel) return ctx.reply("That user is not in VC.");
@@ -376,7 +349,6 @@ async function handleAfk(ctx, mode) {
   return ctx.reply(`🔊 Keepalive enabled. Staying in **${vc.name}**.`);
 }
 
-// ---------------- slash command definition ----------------
 const actionChoices = [
   { name: "Disconnect", value: "disconnect" },
   { name: "Deafen", value: "deafen" },
@@ -393,42 +365,19 @@ const data = new SlashCommandBuilder()
       .setName("user")
       .setDescription("Affect one user")
       .addStringOption((o) =>
-        o
-          .setName("action")
-          .setDescription("What to do")
-          .setRequired(true)
-          .addChoices(...actionChoices)
+        o.setName("action").setDescription("What to do").setRequired(true).addChoices(...actionChoices)
       )
-      .addUserOption((o) =>
-        o
-          .setName("target")
-          .setDescription("Target user")
-          .setRequired(true)
-      )
-      .addStringOption((o) =>
-        o
-          .setName("time")
-          .setDescription("Delay, e.g. 30s, 2m, 1m30s (default 10s)")
-          .setRequired(false)
-      )
+      .addUserOption((o) => o.setName("target").setDescription("Target user").setRequired(true))
+      .addStringOption((o) => o.setName("time").setDescription("Delay, e.g. 30s, 2m, 1m30s (default 10s)").setRequired(false))
   )
   .addSubcommand((sc) =>
     sc
       .setName("all")
       .setDescription("Affect everyone in your current VC")
       .addStringOption((o) =>
-        o
-          .setName("action")
-          .setDescription("What to do")
-          .setRequired(true)
-          .addChoices(...actionChoices)
+        o.setName("action").setDescription("What to do").setRequired(true).addChoices(...actionChoices)
       )
-      .addStringOption((o) =>
-        o
-          .setName("time")
-          .setDescription("Delay, e.g. 30s, 2m, 1m30s (default 10s)")
-          .setRequired(false)
-      )
+      .addStringOption((o) => o.setName("time").setDescription("Delay, e.g. 30s, 2m, 1m30s (default 10s)").setRequired(false))
   )
   .addSubcommand((sc) =>
     sc
@@ -439,19 +388,11 @@ const data = new SlashCommandBuilder()
           .setName("mode")
           .setDescription("Join or leave voice")
           .setRequired(true)
-          .addChoices(
-            { name: "On", value: "join" },
-            { name: "Off", value: "leave" }
-          )
+          .addChoices({ name: "On", value: "join" }, { name: "Off", value: "leave" })
       )
   )
-  .addSubcommand((sc) =>
-    sc
-      .setName("sleepcancel")
-      .setDescription("Cancel a pending sleep sequence")
-  );
+  .addSubcommand((sc) => sc.setName("sleepcancel").setDescription("Cancel a pending sleep sequence"));
 
-// ---------------- export ----------------
 const vcCommand = {
   name: "vc",
   aliases: [
@@ -460,6 +401,11 @@ const vcCommand = {
     "undeafen",
     "mute",
     "unmute",
+    "yeetall",
+    "deafenall",
+    "undeafenall",
+    "muteall",
+    "unmuteall",
     "sleepcancel",
     "stayvc",
     "afkvc",
@@ -473,24 +419,37 @@ const vcCommand = {
 
   async execute(message, args = [], client, invokedName) {
     const ctx = contextFrom(message);
+    const name = (invokedName || "").toLowerCase();
 
-    if (["stayvc", "afkvc", "keepvcalive"].includes(invokedName)) {
-      return handleAfk(ctx, "join");
-    }
+    if (["stayvc", "afkvc", "keepvcalive"].includes(name)) return handleAfk(ctx, "join");
+    if (["stopvcalive", "leavevc", "thxforkeepingthevcalive", "leave"].includes(name)) return handleAfk(ctx, "leave");
+    if (name === "sleepcancel") return handleSleepCancel(ctx);
 
-    if (["stopvcalive", "leavevc", "thxforkeepingthevcalive", "leave"].includes(invokedName)) {
-      return handleAfk(ctx, "leave");
-    }
+    const singleMap = {
+      yeet: "disconnect",
+      deafen: "deafen",
+      undeafen: "undeafen",
+      mute: "mute",
+      unmute: "unmute",
+    };
 
-    if (invokedName === "sleepcancel") {
-      return handleSleepCancel(ctx);
-    }
+    const massMap = {
+      yeetall: "disconnect",
+      deafenall: "deafen",
+      undeafenall: "undeafen",
+      muteall: "mute",
+      unmuteall: "unmute",
+    };
 
-    const prefixAction = invokedName === "yeet" ? "disconnect" : invokedName;
-    if (ACTIONS[prefixAction]) {
+    if (singleMap[name]) {
       const member = message.mentions.members.first();
       const timeArg = args.find((a) => !a.startsWith("<@"));
-      return runSingleAction(ctx, prefixAction, member, timeArg);
+      return runSingleAction(ctx, singleMap[name], member, timeArg);
+    }
+
+    if (massMap[name]) {
+      const timeArg = args[0];
+      return runMassAction(ctx, massMap[name], timeArg);
     }
 
     return message.reply("Use `/vc user`, `/vc all`, `/vc afk`, or `/vc sleepcancel`.");
@@ -502,31 +461,18 @@ const vcCommand = {
 
     await interaction.reply({ content: "⏳ On it...", ephemeral: true });
 
-    if (sub === "sleepcancel") {
-      return handleSleepCancel(ctx);
-    }
-
-    if (sub === "afk") {
-      const mode = interaction.options.getString("mode", true);
-      return handleAfk(ctx, mode);
-    }
+    if (sub === "sleepcancel") return handleSleepCancel(ctx);
+    if (sub === "afk") return handleAfk(ctx, interaction.options.getString("mode", true));
 
     if (sub === "user") {
       const action = interaction.options.getString("action", true);
       const user = interaction.options.getUser("target", true);
-      const member =
-        interaction.options.getMember("target") ||
-        (await interaction.guild.members.fetch(user.id).catch(() => null));
-      const time = interaction.options.getString("time");
-
-      return runSingleAction(ctx, action, member, time);
+      const member = interaction.options.getMember("target") || (await interaction.guild.members.fetch(user.id).catch(() => null));
+      return runSingleAction(ctx, action, member, interaction.options.getString("time"));
     }
 
     if (sub === "all") {
-      const action = interaction.options.getString("action", true);
-      const time = interaction.options.getString("time");
-
-      return runMassAction(ctx, action, time);
+      return runMassAction(ctx, interaction.options.getString("action", true), interaction.options.getString("time"));
     }
   },
 };
