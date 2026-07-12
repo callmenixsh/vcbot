@@ -31,9 +31,6 @@ for (const file of commandFiles) {
             client.commands.set(a, command);
         }
     }
-    // Also register under each slash/context-menu command name (e.g. "Clip
-    // Message" for a context menu command) — these don't always match
-    // command.name/aliases, so interactionCreate needs them too.
     if (command.data) {
         const builders = Array.isArray(command.data) ? command.data : [command.data];
         for (const builder of builders) {
@@ -44,6 +41,21 @@ for (const file of commandFiles) {
 
 client.on('ready', () => {
     console.log(`Logged in as ${client.user.tag}`);
+});
+
+const { ActivityType } = require("discord.js");
+
+client.once("ready", () => {
+  client.user.setPresence({
+    activities: [
+      {
+        type: ActivityType.Custom,
+        name: "custom",
+        state: "nya!help | /help",
+      },
+    ],
+    status: "online",
+  });
 });
 
 client.on("messageCreate", async (message) => {
